@@ -4,6 +4,7 @@ import os
 from typing import IO, Any, BinaryIO
 from collections.abc import Iterable
 from jaxtyping import Float, Int
+from .custom.bpe_counter import read_tokens, BPECounter
 
 import numpy.typing as npt
 import torch
@@ -589,4 +590,11 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    
+    tokens = read_tokens(input_path, special_tokens)
+    
+    bpe_counter = BPECounter(tokens, vocab_size, special_tokens)
+    bpe_counter.merge()
+        
+    return bpe_counter.vocab, bpe_counter.merges
+    

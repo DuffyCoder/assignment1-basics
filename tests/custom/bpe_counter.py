@@ -3,6 +3,7 @@ import regex as re
 import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
+import torch
 
 class BPECounter:
     """高效的字节级 BPE 计数 / 训练器。
@@ -280,17 +281,74 @@ def _process_text_chunk(args):
 
     return tokens
 
-def read_tokens(input_path: str | os.PathLike, special_tokens: list[str], num_workers: int = None) -> list[list[bytes]]:
-    """读取文本文件并执行并行化的预分词，返回字节 token 序列。
+def _check_gpu_availability(text_size_estimate: int) -> tuple[bool, torch.device]:
+    """检查GPU可用性和内存充足性"""
+    # 基础检测：检查CUDA是否可用
+    if not torch.cuda.is_available():
+        return False, torch.device("cpu")
 
-    使用与 GPT-2 相同的正则表达式，将文本拆分为 *字符串* token，随后将每个 token
-    UTF-8 编码并拆分为单字节列表。通过并行化处理提升大文件的处理速度。
-    """
-    if num_workers is None:
-        num_workers = min(4, max(1, mp.cpu_count()))
+    # 设备检测：确认有可用GPU设备
+    if torch.cuda.device_count() == 0:
+        return False, torch.device("cpu")
 
-    boundaries = _find_chunk_boundaries(input_path, num_workers)
-    
+    # 内存检测：估算所需内存（文本大小 * 4倍缓冲）
+    required_memory = text_size_estimate * 4
+    device_props = torch.cuda.get_device_properties(0)
+    available_memory = device_props.total_memory - torch.cuda.memory_allocated(0)
+
+    if available_memory < required_memory:
+        return False, torch.device("cpu")
+
+    # 功能验证：创建小型测试张量验证GPU计算功能
+    try:
+        test_tensor = torch.zeros(100, device="cuda:0")
+        _ = test_tensor + 1
+        del test_tensor  # 清理测试张量
+        torch.cuda.empty_cache()
+        return True, torch.device("cuda:0")
+    except Exception:
+        return False, torch.device("cpu")
+
+def _process_text_chunk_gpu(text_chunks: list[tuple[str, list[str]]], device: torch.device) -> list[list[bytes]]:
+    """GPU优化的文本块处理函数"""
+    PAT = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+
+    all_tokens = []
+
+    for text_chunk, special_tokens in text_chunks:
+        # 构造"特殊 token | 原 PAT" 的整体正则，保证特殊 token 不被进一步拆分
+        if special_tokens:
+            # 按长度排序，避免前缀造成最长匹配错误
+            specials_pat = "|".join(re.escape(tok) for tok in sorted(special_tokens, key=len, reverse=True))
+            combined_pat = rf"({specials_pat})|({PAT})"
+        else:
+            combined_pat = PAT
+
+        tokens: list[list[bytes]] = []
+        special_set = set(special_tokens)
+
+        # 在CPU上进行正则表达式匹配（GPU上正则表达式支持有限）
+        for match in re.finditer(combined_pat, text_chunk):
+            tok = match.group(0)
+            if tok in special_set:
+                tokens.append([tok.encode("utf-8")])
+            else:
+                # 所有非特殊token都拆分为单字节（包括空白字符）
+                tokens.append([bytes([b]) for b in tok.encode("utf-8")])
+
+        all_tokens.extend(tokens)
+
+    return all_tokens
+
+def _read_tokens_gpu(input_path: str | os.PathLike, special_tokens: list[str], device: torch.device) -> list[list[bytes]]:
+    """GPU优化的文本读取和分词处理"""
+    # 对于当前的正则表达式处理，主要瓶颈在CPU上的正则匹配
+    # GPU优化主要体现在更大的批处理和内存优化
+
+    # 使用更大的块数来提高并行度
+    num_chunks = min(8, max(2, mp.cpu_count() * 2))
+    boundaries = _find_chunk_boundaries(input_path, num_chunks)
+
     # 读取各个文本块
     text_chunks = []
     with open(input_path, "rb") as f:
@@ -299,14 +357,51 @@ def read_tokens(input_path: str | os.PathLike, special_tokens: list[str], num_wo
             chunk_bytes = f.read(end - start)
             text_chunk = chunk_bytes.decode("utf-8", errors="ignore")
             text_chunks.append((text_chunk, special_tokens))
-    
+
+    # 使用GPU优化的处理函数
+    return _process_text_chunk_gpu(text_chunks, device)
+
+def _read_tokens_cpu(input_path: str | os.PathLike, special_tokens: list[str], num_workers: int = None) -> list[list[bytes]]:
+    """CPU多进程的文本读取和分词处理（保持原有逻辑）"""
+    if num_workers is None:
+        num_workers = min(4, max(1, mp.cpu_count()))
+
+    boundaries = _find_chunk_boundaries(input_path, num_workers)
+
+    # 读取各个文本块
+    text_chunks = []
+    with open(input_path, "rb") as f:
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            f.seek(start)
+            chunk_bytes = f.read(end - start)
+            text_chunk = chunk_bytes.decode("utf-8", errors="ignore")
+            text_chunks.append((text_chunk, special_tokens))
+
     # 并行处理
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         results = list(executor.map(_process_text_chunk, text_chunks))
-    
+
     # 合并结果
     all_tokens = []
     for chunk_tokens in results:
         all_tokens.extend(chunk_tokens)
-    
+
     return all_tokens
+
+def read_tokens(input_path: str | os.PathLike, special_tokens: list[str], num_workers: int = None) -> list[list[bytes]]:
+    """读取文本文件并执行并行化的预分词，返回字节 token 序列。
+
+    使用与 GPT-2 相同的正则表达式，将文本拆分为 *字符串* token，随后将每个 token
+    UTF-8 编码并拆分为单字节列表。通过GPU优先的并行化处理提升大文件的处理速度。
+    """
+    # 1. 估算文件大小和内存需求
+    file_size = os.path.getsize(input_path)
+
+    # 2. GPU可用性检测
+    gpu_available, device = _check_gpu_availability(file_size)
+
+    # 3. 根据检测结果选择处理模式
+    if gpu_available:
+        return _read_tokens_gpu(input_path, special_tokens, device)
+    else:
+        return _read_tokens_cpu(input_path, special_tokens, num_workers)

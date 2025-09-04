@@ -226,7 +226,7 @@ def main():
     """Main function to run BPE training and analysis"""
 
     # Configuration
-    input_path = "data/TinyStoriesV2-GPT4-train.txt"
+    input_path = "../data/TinyStoriesV2-GPT4-train.txt"
     vocab_size = 10000
     special_tokens = ["<|endoftext|>"]
     output_dir = "bpe_results"

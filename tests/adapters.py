@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from jaxtyping import Float, Int
 from .custom.bpe_counter import read_tokens, BPECounter
 from .custom.tokenizer import Tokenizer
+from .custom.linear import Linear
 
 import numpy.typing as npt
 import torch
@@ -31,7 +32,9 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    linear = Linear(d_in, d_out)
+    linear.weight.data = weights
+    return linear(in_features)
 
 
 def run_embedding(

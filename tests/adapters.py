@@ -7,6 +7,7 @@ from jaxtyping import Float, Int
 from .custom.bpe_counter import read_tokens, BPECounter
 from .custom.tokenizer import Tokenizer
 from .custom.linear import Linear
+from .custom.embedding import Embedding
 
 import numpy.typing as npt
 import torch
@@ -56,7 +57,9 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    embedding = Embedding(vocab_size, d_model)
+    embedding.weight.data = weights
+    return embedding(token_ids)
 
 
 def run_swiglu(

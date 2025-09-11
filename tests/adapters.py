@@ -8,6 +8,8 @@ from .custom.bpe_counter import read_tokens, BPECounter
 from .custom.tokenizer import Tokenizer
 from .custom.linear import Linear
 from .custom.embedding import Embedding
+from .custom.rmsnorm import RMSNorm
+from .custom.positionwise_feedforward import PositionwiseFeedForward
 
 import numpy.typing as npt
 import torch
@@ -91,7 +93,12 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    
+    swiglu = PositionwiseFeedForward(d_model, d_ff)
+    swiglu.w1.weight.data = w1_weight
+    swiglu.w2.weight.data = w2_weight
+    swiglu.w3.weight.data = w3_weight
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -386,7 +393,14 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    in_dtype = in_features.dtype
+    in_features = in_features.to(torch.float32)
+    
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.weight.data = weights
+    results = rmsnorm(in_features)
+    
+    return results.to(in_dtype)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:

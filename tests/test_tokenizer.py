@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import sys
 
 import psutil
 import pytest
 import tiktoken
+
+# Cross-platform resource module handling
+# The resource module is Unix-specific and not available on Windows
+try:
+    import resource
+    HAS_RESOURCE = True
+except ImportError:
+    resource = None
+    HAS_RESOURCE = False
 
 from .adapters import get_tokenizer
 from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
@@ -19,6 +27,11 @@ MERGES_PATH = FIXTURES_PATH / "gpt2_merges.txt"
 def memory_limit(max_mem):
     def decorator(f):
         def wrapper(*args, **kwargs):
+            if not HAS_RESOURCE:
+                # On Windows or other platforms without resource module,
+                # skip memory limiting and just run the function
+                return f(*args, **kwargs)
+
             process = psutil.Process(os.getpid())
             prev_limits = resource.getrlimit(resource.RLIMIT_AS)
             resource.setrlimit(resource.RLIMIT_AS, (process.memory_info().rss + max_mem, -1))

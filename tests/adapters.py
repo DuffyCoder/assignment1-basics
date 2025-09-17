@@ -10,6 +10,8 @@ from .custom.linear import Linear
 from .custom.embedding import Embedding
 from .custom.rmsnorm import RMSNorm
 from .custom.positionwise_feedforward import PositionwiseFeedForward
+from .custom.rope import RoPE
+from .custom.softmax import Softmax
 
 import numpy.typing as npt
 import torch
@@ -215,7 +217,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = RoPE(theta, d_k, max_seq_len)
+    return rope(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
@@ -453,7 +456,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    softmax = Softmax()
+    return softmax(in_features, dim)
 
 
 def run_cross_entropy(

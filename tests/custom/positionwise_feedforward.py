@@ -6,11 +6,30 @@ from einops import einsum
 from .linear import Linear
 
 class PositionwiseFeedForward(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, device: str = None, dtype: torch.dtype = None):
+    def __init__(self, 
+                 d_model: int, 
+                 d_ff: int, 
+                 weights: dict[str, Tensor] | None = None,
+                 device: str = None, 
+                 dtype: torch.dtype = None):
         super().__init__()
         self.d_model = d_model
         self.d_ff = d_ff
-        self._initialize_weights(device, dtype)
+        if weights is not None:
+            self.w1 = Linear(self.d_model, 
+                             self.d_ff, 
+                             weights['ffn.w1.weight'], 
+                             device, dtype)
+            self.w2 = Linear(self.d_ff, 
+                             self.d_model, 
+                             weights['ffn.w2.weight'], 
+                             device, dtype)
+            self.w3 = Linear(self.d_model, 
+                             self.d_ff, 
+                             weights['ffn.w3.weight'], 
+                             device, dtype)
+        else:
+            self._initialize_weights(device, dtype)
     
     def _initialize_weights(self, device: str, dtype: torch.dtype):
         self.w1 = Linear(self.d_model, self.d_ff, device, dtype)

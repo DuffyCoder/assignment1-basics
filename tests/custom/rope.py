@@ -42,5 +42,5 @@ class RoPE(nn.Module):
                 token_positions: Int[Tensor, " ... seq_len"]) -> Float[Tensor, " ... seq_len d_k"]:
 
         return einsum(self.rope_matrix[token_positions], x,
-                       "seq_len d_k_out d_k_in, ... seq_len d_k_in -> ... seq_len d_k_out")
+                       "... seq_len d_k_out d_k_in, ... seq_len d_k_in -> ... seq_len d_k_out")
 

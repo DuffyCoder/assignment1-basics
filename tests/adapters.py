@@ -14,6 +14,7 @@ from .custom.rope import RoPE
 from .custom.softmax import Softmax
 from .custom.scaled_dot_product_attention import ScaledDotProductAttention
 from .custom.multihead_self_attention import MultiheadSelfAttention
+from .custom.transformer_block import TransformerBlock
 
 import numpy.typing as npt
 import torch
@@ -200,7 +201,9 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    mha = MultiheadSelfAttention(
+        d_model, num_heads, q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight, in_features, max_seq_len, theta, token_positions)
+    return mha()
 
 
 def run_rope(
@@ -296,7 +299,8 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    block = TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta, weights, in_features)
+    return block()
 
 
 def run_transformer_lm(

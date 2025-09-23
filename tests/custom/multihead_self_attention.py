@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from einops import rearrange, einsum
 
 from .scaled_dot_product_attention import ScaledDotProductAttention
+from .rope import RoPE
 
 class MultiheadSelfAttention(nn.Module):
     def __init__(self, 
@@ -15,6 +16,9 @@ class MultiheadSelfAttention(nn.Module):
                  v_proj_weight: Float[Tensor, "d_model d_in"],
                  o_proj_weight: Float[Tensor, "d_model d_v"],
                  in_features: Float[Tensor, " ... seq_len d_in"],
+                 max_seq_len: int | None = None,
+                 theta: float | None = None,
+                 token_positions: Int[Tensor, " ... seq_len"] | None = None,
                  ):
         super().__init__()
         self.d_model = d_model
@@ -25,7 +29,13 @@ class MultiheadSelfAttention(nn.Module):
         self.o_proj_weight = o_proj_weight
         self.in_features = in_features
         self.seq_len = in_features.shape[-2]
-
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        self.token_positions = token_positions
+        self.use_rope = ((max_seq_len is not None) and 
+                         (theta is not None) and 
+                         (token_positions is not None))
+        
     def forward(self):
         q = k = v = self.in_features
         q = einsum(q, self.q_proj_weight, 
@@ -42,6 +52,11 @@ class MultiheadSelfAttention(nn.Module):
                    " ... seq_len d_in, d_model d_in -> ... seq_len d_model")
         v = rearrange(v, " ... seq_len (num_heads d_v) -> ... num_heads seq_len d_v", 
                       num_heads=self.num_heads)
+        
+        if self.use_rope:
+            rope = RoPE(self.theta, self.d_model // self.num_heads, self.max_seq_len)
+            q = rope(q, self.token_positions)
+            k = rope(k, self.token_positions)
         
         mask = torch.tril(torch.ones(
             self.seq_len, self.seq_len))

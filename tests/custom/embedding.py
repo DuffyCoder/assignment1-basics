@@ -5,11 +5,19 @@ from einops import einsum
 from jaxtyping import Float
 
 class Embedding(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+    def __init__(self, 
+                 num_embeddings, 
+                 embedding_dim, 
+                 weights: Float[Tensor, " num_embeddings embedding_dim"] | None = None, 
+                 device=None, 
+                 dtype=None):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        self._initialize_weights(device, dtype)
+        if weights is not None:
+            self.weight = weights
+        else:
+            self._initialize_weights(device, dtype)
         
     def _initialize_weights(self, device: str, dtype: torch.dtype):
         d_in, d_out = self.num_embeddings, self.embedding_dim

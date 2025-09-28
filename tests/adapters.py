@@ -16,6 +16,7 @@ from .custom.scaled_dot_product_attention import ScaledDotProductAttention
 from .custom.multihead_self_attention import MultiheadSelfAttention
 from .custom.transformer_block import TransformerBlock
 from .custom.transformer_lm import TransformerLM
+from .custom.cross_entropy import CrossEntropy
 
 import numpy.typing as npt
 import torch
@@ -410,8 +411,7 @@ def run_rmsnorm(
     in_dtype = in_features.dtype
     in_features = in_features.to(torch.float32)
     
-    rmsnorm = RMSNorm(d_model, eps)
-    rmsnorm.weight.data = weights
+    rmsnorm = RMSNorm(d_model, weights, eps)
     results = rmsnorm(in_features)
     
     return results.to(in_dtype)
@@ -486,7 +486,8 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    cross_entropy = CrossEntropy()
+    return cross_entropy(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:

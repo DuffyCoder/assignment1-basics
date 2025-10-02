@@ -17,6 +17,9 @@ from .custom.multihead_self_attention import MultiheadSelfAttention
 from .custom.transformer_block import TransformerBlock
 from .custom.transformer_lm import TransformerLM
 from .custom.cross_entropy import CrossEntropy
+from .custom.adamw import AdamW
+from .custom.lr_cosine_schedule import LrCosineSchedule
+from .custom.gradient_clipping import GradientClipping
 
 import numpy.typing as npt
 import torch
@@ -499,14 +502,15 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    gradient_clipping = GradientClipping(max_l2_norm)
+    gradient_clipping(parameters)
 
 
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -534,7 +538,8 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    lr_cosine_schedule = LrCosineSchedule(it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters)
+    return lr_cosine_schedule()
 
 
 def run_save_checkpoint(

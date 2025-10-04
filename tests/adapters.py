@@ -20,6 +20,7 @@ from .custom.cross_entropy import CrossEntropy
 from .custom.adamw import AdamW
 from .custom.lr_cosine_schedule import LrCosineSchedule
 from .custom.gradient_clipping import GradientClipping
+from .custom.get_batch import GetBatch
 
 import numpy.typing as npt
 import torch
@@ -454,7 +455,8 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    get_batch = GetBatch(dataset, batch_size, context_length, device)
+    return get_batch()
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:

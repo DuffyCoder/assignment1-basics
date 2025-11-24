@@ -1,5 +1,6 @@
 {
     "python.analysis.autoImportCompletions": true,
     "python.languageServer": "None",
-    "cursorpyright.analysis.autoImportCompletions": true
+    "cursorpyright.analysis.autoImportCompletions": true,
+    "chatgpt.openOnStartup": true
 }

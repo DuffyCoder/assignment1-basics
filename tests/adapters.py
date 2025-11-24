@@ -21,6 +21,7 @@ from .custom.adamw import AdamW
 from .custom.lr_cosine_schedule import LrCosineSchedule
 from .custom.gradient_clipping import GradientClipping
 from .custom.get_batch import GetBatch
+from .custom.checkpoint import Checkpoint
 
 import numpy.typing as npt
 import torch
@@ -560,7 +561,8 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    checkpoint = Checkpoint(model, optimizer)
+    checkpoint.save(iteration, out)
 
 
 def run_load_checkpoint(
@@ -581,7 +583,9 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    checkpoint = Checkpoint(model, optimizer)
+    checkpoint.load(src)
+    return checkpoint.iteration
 
 
 def get_tokenizer(

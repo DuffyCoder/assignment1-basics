@@ -19,6 +19,8 @@ class MultiheadSelfAttention(nn.Module):
                  max_seq_len: int | None = None,
                  theta: float | None = None,
                  token_positions: Int[Tensor, " ... seq_len"] | None = None,
+                 temperature: float = 1.0,
+                 top_p: float = 0.0,
                  ):
         super().__init__()
         self.d_model = d_model
@@ -32,6 +34,8 @@ class MultiheadSelfAttention(nn.Module):
         self.max_seq_len = max_seq_len
         self.theta = theta
         self.token_positions = token_positions
+        self.temperature = temperature
+        self.top_p = top_p
         self.use_rope = ((max_seq_len is not None) and 
                          (theta is not None) and 
                          (token_positions is not None))
@@ -61,7 +65,9 @@ class MultiheadSelfAttention(nn.Module):
         mask = torch.tril(torch.ones(
             self.seq_len, self.seq_len))
         
-        attn = ScaledDotProductAttention(q, k, v, mask)
+        attn = ScaledDotProductAttention(
+            q, k, v, mask, temperature=self.temperature, top_p=self.top_p
+        )
         attn_output = attn()
         attn_output = rearrange(attn_output, 
                                 " ... num_heads seq_len d_v -> ... seq_len (num_heads d_v)")

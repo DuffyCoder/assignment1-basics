@@ -10,13 +10,15 @@ class ScaledDotProductAttention(nn.Module):
                  q: Float[Tensor, "batch_size ... seq_len d_k"], 
                  k: Float[Tensor, "batch_size ... seq_len d_k"], 
                  v: Float[Tensor, "batch_size ... seq_len d_v"], 
-                 mask: Float[Tensor, "batch_size ... seq_len seq_len"] | None = None):
+                 mask: Float[Tensor, "batch_size ... seq_len seq_len"] | None = None,
+                 temperature: float = 1.0,
+                 top_p: float = 0.0):
         super().__init__()
         self.q = q
         self.k = k
         self.v = v
         self.mask = mask
-        self.softmax = Softmax()
+        self.softmax = Softmax(temperature=temperature, top_p=top_p)
         self.d_k = q.shape[-1]
     
     def mask_score(self, 

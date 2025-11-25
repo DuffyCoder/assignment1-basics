@@ -15,7 +15,9 @@ class TransformerBlock(nn.Module):
                  max_seq_len: int,
                  theta: float,
                  weights: dict[str, Tensor],
-                 in_features: Float[Tensor, " batch seq_len d_model"]):
+                 in_features: Float[Tensor, " batch seq_len d_model"],
+                 temperature: float = 1.0,
+                 top_p: float = 0.0):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -24,6 +26,8 @@ class TransformerBlock(nn.Module):
         self.theta = theta
         self.weights = weights
         self.in_features = in_features
+        self.temperature = temperature
+        self.top_p = top_p
         self.token_positions = torch.arange(self.in_features.shape[-2])
         self.rmsnorm_1 = RMSNorm(self.d_model, 
                                 self.weights['ln1.weight'])
@@ -39,7 +43,9 @@ class TransformerBlock(nn.Module):
             self.rmsnorm_1(self.in_features), 
             self.max_seq_len, 
             self.theta, 
-            self.token_positions)
+            self.token_positions,
+            self.temperature,
+            self.top_p)
         self.ffn = PositionwiseFeedForward(self.d_model, self.d_ff, self.weights)
         
     def forward(self):

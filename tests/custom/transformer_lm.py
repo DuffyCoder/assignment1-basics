@@ -19,6 +19,8 @@ class TransformerLM(nn.Module):
     rope_theta: float,
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
+    temperature: float = 1.0,
+    top_p: float = 0.0,
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
         super().__init__()
         self.vocab_size = vocab_size
@@ -30,6 +32,8 @@ class TransformerLM(nn.Module):
         self.rope_theta = rope_theta
         self.weights = weights
         self.in_indices = in_indices
+        self.temperature = temperature
+        self.top_p = top_p
         self.embedding = Embedding(
             self.vocab_size,
             self.d_model,
@@ -56,6 +60,8 @@ class TransformerLM(nn.Module):
                 self.rope_theta,
                 layer_weights,
                 x,
+                self.temperature,
+                self.top_p,
             )()
 
         output = self.output(self.rmsnorm(x))

@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from .checkpoint import Checkpoint
+from .experiment_logger import ExperimentLogger, ExperimentLoggingConfig
 from .get_batch import GetBatch
 import wandb
 
@@ -71,6 +72,7 @@ class TrainConfig:
     wandb_project: str | None = None
     wandb_run_name: str | None = None
     wandb_config: dict[str, Any] | None = None
+    experiment_logging: ExperimentLoggingConfig | None = None
 
 
 def parse_args(argv: list[str] | None = None) -> TrainConfig:
@@ -98,10 +100,18 @@ def parse_args(argv: list[str] | None = None) -> TrainConfig:
     scheduler_cfg = _convert_scheduler(raw_cfg.pop("scheduler", None))
     checkpoint_cfg = _convert_checkpoint(raw_cfg.pop("checkpoint", None))
 
+    def _convert_experiment_logging(cfg: dict[str, Any] | None) -> ExperimentLoggingConfig | None:
+        if cfg is None:
+            return None
+        return ExperimentLoggingConfig(**cfg)
+
+    experiment_logging_cfg = _convert_experiment_logging(raw_cfg.pop("experiment_logging", None))
+
     train_cfg = TrainConfig(
         optimizer=optimizer_cfg,
         scheduler=scheduler_cfg,
         checkpoint=checkpoint_cfg,
+        experiment_logging=experiment_logging_cfg,
         **raw_cfg,
     )
     return train_cfg
@@ -277,6 +287,18 @@ def train_loop(cfg: TrainConfig) -> None:
 
     progress = tqdm(range(current_step, cfg.total_iters), initial=current_step, total=cfg.total_iters)
     start_time = time.time()
+    run_start = time.perf_counter()
+
+    experiment_logger = ExperimentLogger(cfg.experiment_logging)
+    if experiment_logger.enabled:
+        experiment_logger.log_config(asdict(cfg))
+        experiment_logger.log_event(
+            "training_started",
+            current_step=current_step,
+            total_iters=cfg.total_iters,
+            device=cfg.device,
+            dtype=cfg.dtype,
+        )
 
     for step in progress:
         x, y = next(iter(train_loader))
@@ -315,6 +337,7 @@ def train_loop(cfg: TrainConfig) -> None:
             payload = {"train/loss": loss.item(), **metrics}
             _log_to_console(step + 1, {"train/loss": loss.item()}, metrics)
             _log_to_wandb(step + 1, payload)
+            experiment_logger.log_metrics(step + 1, time.perf_counter() - run_start, payload, split="train")
             start_time = time.time()
 
         if val_loader is not None and (step + 1) % cfg.validate_every == 0:
@@ -322,6 +345,7 @@ def train_loop(cfg: TrainConfig) -> None:
             payload = {"val/loss": val_loss}
             _log_to_console(step + 1, {"val/loss": val_loss}, {})
             _log_to_wandb(step + 1, payload)
+            experiment_logger.log_metrics(step + 1, time.perf_counter() - run_start, payload, split="val")
 
         if cfg.checkpoint and (step + 1) % cfg.checkpoint.every_n_steps == 0:
             ckpt_path = Path(cfg.checkpoint.path)
@@ -343,6 +367,17 @@ def train_loop(cfg: TrainConfig) -> None:
 
     if wandb is not None and wandb.run is not None:
         wandb.finish()
+
+    if experiment_logger.enabled:
+        experiment_logger.log_event("training_finished", final_step=cfg.total_iters)
+        experiment_logger.finalize(
+            status="completed",
+            summary={
+                "total_steps": cfg.total_iters,
+                "train_data_path": cfg.train_data_path,
+                "val_data_path": cfg.val_data_path,
+            },
+        )
 
 
 def main(argv: list[str] | None = None) -> None:

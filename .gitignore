@@ -161,3 +161,6 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+# Experiment tracking artifacts
+experiments/runs/

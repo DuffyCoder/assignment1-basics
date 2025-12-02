@@ -7,9 +7,10 @@ import math
 import os
 import sys
 import time
+import pickle
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ from tqdm import tqdm
 from .checkpoint import Checkpoint
 from .experiment_logger import ExperimentLogger, ExperimentLoggingConfig
 from .get_batch import GetBatch
+from .tokenizer import Tokenizer
 import wandb
 
 
@@ -73,6 +75,14 @@ class TrainConfig:
     wandb_run_name: str | None = None
     wandb_config: dict[str, Any] | None = None
     experiment_logging: ExperimentLoggingConfig | None = None
+    hf_dataset_name: str | None = None
+    hf_train_split: str = "train"
+    hf_val_split: str | None = "validation"
+    hf_text_field: str = "text"
+    hf_eos_token: str | None = "<|endoftext|>"
+    tokenizer_vocab_path: str | None = None
+    tokenizer_merges_path: str | None = None
+    tokenizer_special_tokens: list[str] = field(default_factory=lambda: ["<|endoftext|>"])
 
 
 def parse_args(argv: list[str] | None = None) -> TrainConfig:
@@ -124,8 +134,96 @@ def _load_numpy_memmap(path: str, dtype: str) -> np.memmap:
     return np.memmap(path_obj, dtype=getattr(np, dtype), mode="r")
 
 
+def _load_vocab_file(path: str) -> dict[int, bytes]:
+    with open(path, "r", encoding="utf-8") as f:
+        raw_vocab = json.load(f)
+    vocab: dict[int, bytes] = {}
+    for key, value in raw_vocab.items():
+        token_id = int(key)
+        if isinstance(value, list):
+            vocab[token_id] = bytes(value)
+        elif isinstance(value, str):
+            vocab[token_id] = value.encode("utf-8")
+        else:
+            raise TypeError(f"无法解析词表条目 {key}: {type(value)}")
+    return vocab
+
+
+def _load_merges_file(path: str) -> list[tuple[bytes, bytes]]:
+    merges_path = Path(path)
+    if merges_path.suffix == ".pkl":
+        with merges_path.open("rb") as fh:
+            merges = pickle.load(fh)
+        return [(bytes(first), bytes(second)) for first, second in merges]
+
+    merges: list[tuple[bytes, bytes]] = []
+    with merges_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) != 2:
+                continue
+            merges.append((parts[0].encode("utf-8"), parts[1].encode("utf-8")))
+    return merges
+
+
+def _build_tokenizer_from_cfg(cfg: TrainConfig) -> Tokenizer:
+    if not cfg.tokenizer_vocab_path or not cfg.tokenizer_merges_path:
+        raise ValueError("使用 Hugging Face 数据集需要提供 tokenizer_vocab_path 和 tokenizer_merges_path")
+    vocab = _load_vocab_file(cfg.tokenizer_vocab_path)
+    merges = _load_merges_file(cfg.tokenizer_merges_path)
+    return Tokenizer(vocab, merges, cfg.tokenizer_special_tokens)
+
+
+def _iterate_text_column(dataset: Iterable[dict[str, Any]], text_field: str) -> Iterator[str]:
+    for row in dataset:
+        if text_field not in row:
+            raise KeyError(f"数据行缺少字段 {text_field}")
+        text = row[text_field]
+        if not isinstance(text, str):
+            raise TypeError(f"字段 {text_field} 需要是 str, 当前为 {type(text)}")
+        yield text
+
+
+def _tokenize_texts(
+    texts: Iterable[str],
+    tokenizer: Tokenizer,
+    dtype: str,
+    eos_token: str | None,
+) -> np.ndarray:
+    token_buffer: list[int] = []
+    append = token_buffer.extend
+    eos_ids = tokenizer.encode(eos_token) if eos_token else []
+    for text in texts:
+        ids = tokenizer.encode(text)
+        append(ids)
+        if eos_ids:
+            append(eos_ids)
+    if not token_buffer:
+        raise ValueError("Tokenizer 结果为空，检查文本字段是否正确")
+    return np.asarray(token_buffer, dtype=getattr(np, dtype))
+
+
+def _load_hf_split_tokens(cfg: TrainConfig, split: str) -> np.ndarray:
+    try:
+        from datasets import load_dataset  # type: ignore
+    except ImportError as exc:  # pragma: no cover - 依赖提醒
+        raise ImportError("需要安装 `datasets` 库来直接从 Hugging Face 加载 TinyStories 数据集") from exc
+
+    if not cfg.hf_dataset_name:
+        raise ValueError("未指定 hf_dataset_name，无法使用 Hugging Face 数据集")
+
+    print(f"从 Hugging Face 加载数据集 {cfg.hf_dataset_name} (split={split})")
+    dataset = load_dataset(cfg.hf_dataset_name, split=split)
+    tokenizer = _build_tokenizer_from_cfg(cfg)
+    texts = _iterate_text_column(dataset, cfg.hf_text_field)
+    return _tokenize_texts(texts, tokenizer, cfg.tokenizer_np_dtype, cfg.hf_eos_token)
+
+
 class MemmapDataset(Dataset):
-    def __init__(self, memmap_array: np.memmap, context_length: int):
+    def __init__(self, memmap_array: np.ndarray, context_length: int):
         self.memmap_array = memmap_array
         self.context_length = context_length
 
@@ -145,6 +243,25 @@ def build_model(cfg: TrainConfig) -> nn.Module:
     model_cls = getattr(module, cfg.model_class)
     model: nn.Module = model_cls(**cfg.model_kwargs)
     return model
+
+
+def _load_train_tokens(cfg: TrainConfig) -> np.ndarray:
+    if cfg.hf_dataset_name:
+        split = cfg.hf_train_split or "train"
+        return _load_hf_split_tokens(cfg, split)
+    if not cfg.train_data_path:
+        raise ValueError("train_data_path 未配置，且未启用 Hugging Face 数据集")
+    return _load_numpy_memmap(cfg.train_data_path, cfg.tokenizer_np_dtype)
+
+
+def _load_val_tokens(cfg: TrainConfig) -> np.ndarray | None:
+    if cfg.hf_dataset_name:
+        if not cfg.hf_val_split:
+            return None
+        return _load_hf_split_tokens(cfg, cfg.hf_val_split)
+    if not cfg.val_data_path:
+        return None
+    return _load_numpy_memmap(cfg.val_data_path, cfg.tokenizer_np_dtype)
 
 
 def build_optimizer(model: nn.Module, cfg: OptimizerConfig) -> Optimizer:
@@ -236,7 +353,7 @@ def evaluate(
     return float(np.mean(losses)) if losses else math.nan
 
 
-def _prepare_dataloader(memmap_array: np.memmap, cfg: TrainConfig, shuffle: bool) -> DataLoader:
+def _prepare_dataloader(memmap_array: np.ndarray, cfg: TrainConfig, shuffle: bool) -> DataLoader:
     dataset = MemmapDataset(memmap_array, cfg.context_length)
     return DataLoader(
         dataset,
@@ -252,8 +369,8 @@ def train_loop(cfg: TrainConfig) -> None:
     _set_seed(cfg.seed)
     dtype = _resolve_dtype(cfg.dtype)
 
-    train_memmap = _load_numpy_memmap(cfg.train_data_path, cfg.tokenizer_np_dtype)
-    val_memmap = _load_numpy_memmap(cfg.val_data_path, cfg.tokenizer_np_dtype) if cfg.val_data_path else None
+    train_tokens = _load_train_tokens(cfg)
+    val_tokens = _load_val_tokens(cfg)
 
     model = build_model(cfg)
     model = _maybe_cast(model, dtype, cfg.device)
@@ -280,8 +397,8 @@ def train_loop(cfg: TrainConfig) -> None:
             config=cfg.wandb_config or asdict(cfg),
         )
 
-    train_loader = _prepare_dataloader(train_memmap, cfg, shuffle=True)
-    val_loader = _prepare_dataloader(val_memmap, cfg, shuffle=False) if val_memmap is not None else None
+    train_loader = _prepare_dataloader(train_tokens, cfg, shuffle=True)
+    val_loader = _prepare_dataloader(val_tokens, cfg, shuffle=False) if val_tokens is not None else None
 
     scaler = torch.amp.GradScaler(enabled=(dtype == torch.float16 and "cuda" in cfg.device))
 
@@ -300,8 +417,14 @@ def train_loop(cfg: TrainConfig) -> None:
             dtype=cfg.dtype,
         )
 
+    train_iter = iter(train_loader)
     for step in progress:
-        x, y = next(iter(train_loader))
+        try:
+            x, y = next(train_iter)
+        except StopIteration:
+            # Exhausted the DataLoader; re-create the iterator so shuffling is honored.
+            train_iter = iter(train_loader)
+            x, y = next(train_iter)
         x = x.to(cfg.device)
         y = y.to(cfg.device)
 

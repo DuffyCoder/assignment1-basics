@@ -164,3 +164,9 @@ cython_debug/
 
 # Experiment tracking artifacts
 experiments/runs/
+
+# Local dataset artifacts
+data/*.txt
+data/*.bin
+data/*.npz
+data/*.jsonl

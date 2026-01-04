@@ -1,11 +1,20 @@
 {
     "model_module": "tests.custom.transformer_lm",
     "model_class": "TransformerLM",
-    "model_kwargs": {"vocab_size": 50257, "n_layers": 8, "n_heads": 8, "embed_dim": 512, "context_length": 256},
-    "train_data_path": "data/tinystories_train.bin",
-    "val_data_path": "data/tinystories_val.bin",
+    "model_kwargs": {
+        "vocab_size": 10000,
+        "context_length": 256,
+        "d_model": 512,
+        "num_layers": 8,
+        "num_heads": 8,
+        "d_ff": 2048,
+        "rope_theta": 10000.0
+    },
+    "train_data_path": "data/TinyStoriesV2-GPT4-train.bin",
+    "val_data_path": "data/TinyStoriesV2-GPT4-valid.bin",
     "context_length": 256,
     "batch_size": 32,
+    "micro_batch_size": 8,
     "total_iters": 2000,
     "optimizer": {"lr": 3e-4, "weight_decay": 0.01},
     "scheduler": {"warmup_iters": 200, "max_iters": 2000, "min_lr": 3e-5},

@@ -1,56 +1,39 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from jaxtyping import Float
-from einops import einsum, rearrange
-from .rmsnorm import RMSNorm
+from jaxtyping import Float, Int
+
 from .multihead_self_attention import MultiheadSelfAttention
 from .positionwise_feedforward import PositionwiseFeedForward
+from .rmsnorm import RMSNorm
+
 
 class TransformerBlock(nn.Module):
-    def __init__(self, 
-                 d_model: int,
-                 num_heads: int,
-                 d_ff: int,
-                 max_seq_len: int,
-                 theta: float,
-                 weights: dict[str, Tensor],
-                 in_features: Float[Tensor, " batch seq_len d_model"],
-                 temperature: float = 1.0,
-                 top_p: float = 0.0):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        rope_theta: float | None = None,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.d_ff = d_ff
-        self.max_seq_len = max_seq_len
-        self.theta = theta
-        self.weights = weights
-        self.in_features = in_features
-        self.temperature = temperature
-        self.top_p = top_p
-        self.token_positions = torch.arange(self.in_features.shape[-2])
-        self.rmsnorm_1 = RMSNorm(self.d_model, 
-                                self.weights['ln1.weight'])
-        self.rmsnorm_2 = RMSNorm(self.d_model, 
-                                self.weights['ln2.weight'])
-        self.mha = MultiheadSelfAttention(
-            self.d_model, 
-            self.num_heads, 
-            self.weights['attn.q_proj.weight'], 
-            self.weights['attn.k_proj.weight'], 
-            self.weights['attn.v_proj.weight'], 
-            self.weights['attn.output_proj.weight'], 
-            self.rmsnorm_1(self.in_features), 
-            self.max_seq_len, 
-            self.theta, 
-            self.token_positions,
-            self.temperature,
-            self.top_p)
-        self.ffn = PositionwiseFeedForward(self.d_model, self.d_ff, self.weights)
-        
-    def forward(self):
-        x_attn = self.mha() + self.in_features
-        x_ffn = self.ffn(self.rmsnorm_2(x_attn)) + x_attn
-        return x_ffn
-    
-    
+        self.norm1 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.attn = MultiheadSelfAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            context_length=context_length,
+            rope_theta=rope_theta,
+            device=device,
+            dtype=dtype,
+        )
+        self.norm2 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ffn = PositionwiseFeedForward(d_model=d_model, d_ff=d_ff, device=device, dtype=dtype)
+
+    def forward(self, x: Float[Tensor, " batch seq_len d_model"], token_positions: Int[Tensor, " batch seq_len"]) -> Float[Tensor, " batch seq_len d_model"]:
+        attn_out = self.attn(self.norm1(x), token_positions=token_positions)
+        x = x + attn_out
+        x = x + self.ffn(self.norm2(x))
+        return x

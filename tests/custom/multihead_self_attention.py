@@ -1,78 +1,72 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
+from einops import rearrange
 from jaxtyping import Float, Int
-from einops import rearrange, einsum
 
-from .scaled_dot_product_attention import ScaledDotProductAttention
+from .linear import Linear
 from .rope import RoPE
+from .scaled_dot_product_attention import ScaledDotProductAttention
+
 
 class MultiheadSelfAttention(nn.Module):
-    def __init__(self, 
-                 d_model: int, 
-                 num_heads: int,
-                 q_proj_weight: Float[Tensor, "d_model d_in"],
-                 k_proj_weight: Float[Tensor, "d_model d_in"],
-                 v_proj_weight: Float[Tensor, "d_model d_in"],
-                 o_proj_weight: Float[Tensor, "d_model d_v"],
-                 in_features: Float[Tensor, " ... seq_len d_in"],
-                 max_seq_len: int | None = None,
-                 theta: float | None = None,
-                 token_positions: Int[Tensor, " ... seq_len"] | None = None,
-                 temperature: float = 1.0,
-                 top_p: float = 0.0,
-                 ):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        context_length: int,
+        rope_theta: float | None = None,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model 必须能被 num_heads 整除")
+
         self.d_model = d_model
         self.num_heads = num_heads
-        self.q_proj_weight = q_proj_weight
-        self.k_proj_weight = k_proj_weight
-        self.v_proj_weight = v_proj_weight
-        self.o_proj_weight = o_proj_weight
-        self.in_features = in_features
-        self.seq_len = in_features.shape[-2]
-        self.max_seq_len = max_seq_len
-        self.theta = theta
-        self.token_positions = token_positions
-        self.temperature = temperature
-        self.top_p = top_p
-        self.use_rope = ((max_seq_len is not None) and 
-                         (theta is not None) and 
-                         (token_positions is not None))
-        
-    def forward(self):
-        q = k = v = self.in_features
-        q = einsum(q, self.q_proj_weight, 
-                   " ... seq_len d_in, d_model d_in -> ... seq_len d_model")
-        q = rearrange(q, " ... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", 
-                      num_heads=self.num_heads)
-        
-        k = einsum(k, self.k_proj_weight, 
-                   " ... seq_len d_in, d_model d_in -> ... seq_len d_model")
-        k = rearrange(k, " ... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", 
-                      num_heads=self.num_heads)
-        
-        v = einsum(v, self.v_proj_weight, 
-                   " ... seq_len d_in, d_model d_in -> ... seq_len d_model")
-        v = rearrange(v, " ... seq_len (num_heads d_v) -> ... num_heads seq_len d_v", 
-                      num_heads=self.num_heads)
-        
-        if self.use_rope:
-            rope = RoPE(self.theta, self.d_model // self.num_heads, self.max_seq_len)
-            q = rope(q, self.token_positions)
-            k = rope(k, self.token_positions)
-        
-        mask = torch.tril(torch.ones(
-            self.seq_len, self.seq_len))
-        
-        attn = ScaledDotProductAttention(
-            q, k, v, mask, temperature=self.temperature, top_p=self.top_p
+        self.head_dim = d_model // num_heads
+        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.use_rope = rope_theta is not None
+        self.rope = (
+            RoPE(theta=rope_theta, d_k=self.head_dim, max_seq_len=context_length, device=device, dtype=dtype)
+            if self.use_rope
+            else None
         )
-        attn_output = attn()
-        attn_output = rearrange(attn_output, 
-                                " ... num_heads seq_len d_v -> ... seq_len (num_heads d_v)")
-        
-        output = einsum(attn_output, self.o_proj_weight,
-                        " ... seq_len d_v, d_model d_v -> ... seq_len d_model")
-        return output
-        
+        mask = torch.tril(torch.ones(context_length, context_length, dtype=torch.bool))
+        self.register_buffer("causal_mask", mask, persistent=False)
+
+    def forward(
+        self,
+        x: Float[Tensor, " batch seq_len d_model"],
+        token_positions: Int[Tensor, " batch seq_len"] | None = None,
+    ) -> Float[Tensor, " batch seq_len d_model"]:
+        batch_size, seq_len, _ = x.shape
+        q = rearrange(self.q_proj(x), "b s (h d) -> b h s d", h=self.num_heads)
+        k = rearrange(self.k_proj(x), "b s (h d) -> b h s d", h=self.num_heads)
+        v = rearrange(self.v_proj(x), "b s (h d) -> b h s d", h=self.num_heads)
+
+        if self.use_rope and self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(seq_len, device=x.device, dtype=torch.long).unsqueeze(0)
+                token_positions = token_positions.expand(batch_size, seq_len)
+            token_positions = token_positions.unsqueeze(1).expand(batch_size, self.num_heads, seq_len)
+            q = self.rope(q, token_positions)
+            k = self.rope(k, token_positions)
+
+        mask = self.causal_mask[:seq_len, :seq_len]
+        mask = mask.to(device=x.device)
+        mask = mask.unsqueeze(0).unsqueeze(0)
+
+        attn_module = ScaledDotProductAttention(
+            q=q,
+            k=k,
+            v=v,
+            mask=mask,
+        )
+        attn_output = attn_module()
+        attn_output = rearrange(attn_output, "b h s d -> b s (h d)")
+        return self.o_proj(attn_output)

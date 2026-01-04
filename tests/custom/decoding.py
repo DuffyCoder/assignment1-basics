@@ -110,18 +110,9 @@ class Decoding(nn.Module):
         generated_tokens = list(prompt_tokens)
         stop_token_id = self._maybe_get_stop_token_id(tokenizer)
 
-        # Ensure the LM inputs and weights live on the same device.
         weight_device = next(iter(weights.values())).device
         target_device = torch.device(device) if device is not None else weight_device
-        if weight_device != target_device:
-            weights = {k: v.to(target_device) for k, v in weights.items()}
 
-        # Instantiate a TransformerLM once and reuse it by updating the indices.
-        dummy_in_indices = torch.tensor(
-            [generated_tokens[-self.context_length:]],
-            dtype=torch.long,
-            device=target_device,
-        )
         lm = TransformerLM(
             vocab_size=self.vocab_size,
             context_length=self.context_length,
@@ -130,16 +121,16 @@ class Decoding(nn.Module):
             num_heads=self.num_heads,
             d_ff=self.d_ff,
             rope_theta=self.rope_theta,
-            weights=weights,
-            in_indices=dummy_in_indices,
-        )
+        ).to(target_device)
+        mapped_weights = {k: v.to(target_device) if v.device != target_device else v for k, v in weights.items()}
+        lm.load_state_dict(mapped_weights)
+        lm.eval()
 
         new_tokens = 0
         while new_tokens < max_new_tokens and len(generated_tokens) < self.max_length:
             context = generated_tokens[-self.context_length :]
             input_ids = torch.tensor([context], dtype=torch.long, device=target_device)
-            lm.in_indices = input_ids
-            logits = lm()[0, -1, :]
+            logits = lm(input_ids)[0, -1, :]
             probs = self._sampler(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).item()
 

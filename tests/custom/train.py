@@ -9,6 +9,7 @@ import sys
 import time
 import pickle
 from dataclasses import asdict, dataclass, field
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -21,7 +22,6 @@ from tqdm import tqdm
 
 from .checkpoint import Checkpoint
 from .experiment_logger import ExperimentLogger, ExperimentLoggingConfig
-from .get_batch import GetBatch
 from .tokenizer import Tokenizer
 import wandb
 
@@ -330,6 +330,8 @@ def _log_to_console(step: int, losses: dict[str, float], metrics: dict[str, floa
 
 
 def _log_to_wandb(step: int, payload: dict[str, float]) -> None:
+    if wandb.run is None:
+        return
     wandb.log(payload, step=step)
 
 
@@ -338,7 +340,6 @@ def evaluate(
     dataloader: DataLoader,
     loss_fn: nn.Module,
     device: str,
-    dtype: torch.dtype,
 ) -> float:
     model.eval()
     losses: list[float] = []
@@ -346,18 +347,23 @@ def evaluate(
         for x, y in dataloader:
             x = x.to(device)
             y = y.to(device)
-            logits = model(x.to(dtype=dtype))
+            logits = model(x)
             loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
             losses.append(loss.item())
     model.train()
     return float(np.mean(losses)) if losses else math.nan
 
 
-def _prepare_dataloader(memmap_array: np.ndarray, cfg: TrainConfig, shuffle: bool) -> DataLoader:
+def _prepare_dataloader(
+    memmap_array: np.ndarray,
+    cfg: TrainConfig,
+    shuffle: bool,
+    batch_size: int,
+) -> DataLoader:
     dataset = MemmapDataset(memmap_array, cfg.context_length)
     return DataLoader(
         dataset,
-        batch_size=cfg.batch_size,
+        batch_size=batch_size,
         shuffle=shuffle,
         drop_last=True,
         num_workers=0,
@@ -397,10 +403,22 @@ def train_loop(cfg: TrainConfig) -> None:
             config=cfg.wandb_config or asdict(cfg),
         )
 
-    train_loader = _prepare_dataloader(train_tokens, cfg, shuffle=True)
-    val_loader = _prepare_dataloader(val_tokens, cfg, shuffle=False) if val_tokens is not None else None
+    micro_batch_size = cfg.micro_batch_size or cfg.batch_size
+    if micro_batch_size <= 0:
+        raise ValueError("micro_batch_size 必须为正整数")
+    if cfg.batch_size % micro_batch_size != 0:
+        raise ValueError("batch_size 需要能被 micro_batch_size 整除以便做梯度累积")
+    grad_accum_steps = cfg.batch_size // micro_batch_size
+
+    train_loader = _prepare_dataloader(train_tokens, cfg, shuffle=True, batch_size=micro_batch_size)
+    val_loader = (
+        _prepare_dataloader(val_tokens, cfg, shuffle=False, batch_size=micro_batch_size)
+        if val_tokens is not None
+        else None
+    )
 
     scaler = torch.amp.GradScaler(enabled=(dtype == torch.float16 and "cuda" in cfg.device))
+    autocast_device = "cuda" if "cuda" in cfg.device else "cpu"
 
     progress = tqdm(range(current_step, cfg.total_iters), initial=current_step, total=cfg.total_iters)
     start_time = time.time()
@@ -419,52 +437,66 @@ def train_loop(cfg: TrainConfig) -> None:
 
     train_iter = iter(train_loader)
     for step in progress:
-        try:
-            x, y = next(train_iter)
-        except StopIteration:
-            # Exhausted the DataLoader; re-create the iterator so shuffling is honored.
-            train_iter = iter(train_loader)
-            x, y = next(train_iter)
-        x = x.to(cfg.device)
-        y = y.to(cfg.device)
-
         optimizer.zero_grad(set_to_none=True)
-
         use_amp = scaler.is_enabled()
-        with torch.amp.autocast(enabled=use_amp, dtype=dtype):
-            logits = model(x.to(dtype=dtype))
-            loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+        accumulated_loss = 0.0
+
+        for micro_step in range(grad_accum_steps):
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                x, y = next(train_iter)
+
+            x = x.to(cfg.device)
+            y = y.to(cfg.device)
+
+            autocast_ctx = (
+                torch.amp.autocast(device_type=autocast_device, dtype=dtype)
+                if use_amp
+                else nullcontext()
+            )
+            with autocast_ctx:
+                logits = model(x)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+            accumulated_loss += loss.item()
+            loss_to_backward = loss / grad_accum_steps
+
+            if use_amp:
+                scaler.scale(loss_to_backward).backward()
+            else:
+                loss_to_backward.backward()
+
+        if cfg.gradient_clip is not None:
+            if use_amp:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.gradient_clip)
 
         if use_amp:
-            scaler.scale(loss).backward()
-            if cfg.gradient_clip is not None:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.gradient_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
-            if cfg.gradient_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.gradient_clip)
             optimizer.step()
 
         if scheduler is not None:
             scheduler.step()
 
         elapsed = time.time() - start_time
+        mean_loss = accumulated_loss / grad_accum_steps
+
         if (step + 1) % cfg.log_every == 0:
             metrics = {
                 "tokens_per_sec": cfg.batch_size * cfg.context_length * cfg.log_every / max(elapsed, 1e-6),
                 "lr": optimizer.param_groups[0]["lr"],
             }
-            payload = {"train/loss": loss.item(), **metrics}
-            _log_to_console(step + 1, {"train/loss": loss.item()}, metrics)
+            payload = {"train/loss": mean_loss, **metrics}
+            _log_to_console(step + 1, {"train/loss": mean_loss}, metrics)
             _log_to_wandb(step + 1, payload)
             experiment_logger.log_metrics(step + 1, time.perf_counter() - run_start, payload, split="train")
             start_time = time.time()
 
         if val_loader is not None and (step + 1) % cfg.validate_every == 0:
-            val_loss = evaluate(model, val_loader, loss_fn, cfg.device, dtype)
+            val_loss = evaluate(model, val_loader, loss_fn, cfg.device)
             payload = {"val/loss": val_loss}
             _log_to_console(step + 1, {"val/loss": val_loss}, {})
             _log_to_wandb(step + 1, payload)
